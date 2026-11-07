@@ -31,7 +31,7 @@
             collectOnReturn: true,      // collect when coming back from an expedition
             collectOnDeparture: true,   // collect just before leaving on an expedition
             collectWhenStable: true,    // collect when resources stop changing
-            stableSeconds: 5,           // seconds of no change before collecting
+            stableSeconds: 10,           // seconds of no change before collecting
             pollInterval: 1000,         // ms between resource-value checks
         },
         selectors: {
