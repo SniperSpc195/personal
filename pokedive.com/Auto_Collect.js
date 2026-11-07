@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.1.0
 // @description  Automatically collects available rewards on pokedive.com
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -12,6 +12,13 @@
 
 (function() {
     'use strict';
+
+    const SCRIPT_NAME = 'PokeDive Auto Collect';
+    const INIT_KEY = '__pokedive_auto_collect_initialized';
+
+    // Guard against double initialization (userscript manager re-injection)
+    if (window[INIT_KEY]) return;
+    window[INIT_KEY] = true;
 
     const CONFIG = {
         storageKey: 'pokedive_autocollect_settings',
@@ -32,19 +39,37 @@
     let settings = { ...CONFIG.defaults };
     let timer = null;
     let isCollecting = false;
-    let initialized = false;
+    let lastUrl = null;
+    let urlWatcher = null;
 
     const log = (...args) => {
         if (settings.debug) {
-            console.log('[PokeDive Auto Collect]', ...args);
+            console.log('[' + SCRIPT_NAME + ']', ...args);
         }
     };
 
+    function validateSettings(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        var s = {};
+        s.enabled = typeof raw.enabled === 'boolean' ? raw.enabled : CONFIG.defaults.enabled;
+        s.interval = typeof raw.interval === 'number' && raw.interval > 0 ? raw.interval : CONFIG.defaults.interval;
+        s.collectEnergy = typeof raw.collectEnergy === 'boolean' ? raw.collectEnergy : CONFIG.defaults.collectEnergy;
+        s.collectItems = typeof raw.collectItems === 'boolean' ? raw.collectItems : CONFIG.defaults.collectItems;
+        s.debug = typeof raw.debug === 'boolean' ? raw.debug : CONFIG.defaults.debug;
+        return s;
+    }
+
     function loadSettings() {
         try {
-            const raw = localStorage.getItem(CONFIG.storageKey);
+            var raw = localStorage.getItem(CONFIG.storageKey);
             if (raw) {
-                settings = { ...CONFIG.defaults, ...JSON.parse(raw) };
+                var parsed = JSON.parse(raw);
+                var validated = validateSettings(parsed);
+                if (validated) {
+                    settings = Object.assign({}, CONFIG.defaults, validated);
+                } else {
+                    log('Invalid stored settings, using defaults');
+                }
             }
         } catch (e) {
             log('Failed to load settings:', e);
@@ -59,16 +84,50 @@
         }
     }
 
+    function cleanup() {
+        if (timer) {
+            clearInterval(timer);
+            timer = null;
+        }
+        if (urlWatcher) {
+            clearInterval(urlWatcher);
+            urlWatcher = null;
+        }
+        ['pokedive-autocollect-toggle', 'pokedive-autocollect-popup', 'pokedive-autocollect-overlay'].forEach(function(id) {
+            var el = document.getElementById(id);
+            if (el) el.remove();
+        });
+        document.querySelectorAll('[data-pd-collected="true"]').forEach(function(btn) {
+            delete btn.dataset.pdCollected;
+        });
+        log('Cleanup complete');
+    }
+
+    function startUrlWatcher() {
+        lastUrl = location.href;
+        urlWatcher = setInterval(function() {
+            if (location.href !== lastUrl) {
+                log('URL change detected, cleaning up and reinitializing');
+                cleanup();
+                window[INIT_KEY] = false;
+                setTimeout(function() {
+                    window[INIT_KEY] = true;
+                    init();
+                }, 100);
+            }
+        }, 1000);
+    }
+
     function findCollectButtons() {
-        const buttons = [];
+        var buttons = [];
         try {
-            const candidates = document.querySelectorAll(CONFIG.selectors.collectButtons);
-            candidates.forEach(btn => {
+            var candidates = document.querySelectorAll(CONFIG.selectors.collectButtons);
+            candidates.forEach(function(btn) {
                 if (!btn) return;
                 if (btn.disabled || btn.dataset.pdCollected === 'true') return;
-                const rect = btn.getBoundingClientRect();
+                var rect = btn.getBoundingClientRect();
                 if (rect.width === 0 && rect.height === 0) return;
-                const text = (btn.textContent || '').trim().toLowerCase();
+                var text = (btn.textContent || '').trim().toLowerCase();
                 if (text.includes('collect') || text.includes('claim') ||
                     text.includes('reward') || text.includes('collect reward') ||
                     btn.classList.contains('collect') || btn.classList.contains('claim')) {
@@ -97,10 +156,10 @@
 
     function runCollection() {
         if (!settings.enabled) return;
-        const buttons = findCollectButtons();
+        var buttons = findCollectButtons();
         log('Found', buttons.length, 'collectable button(s)');
-        buttons.forEach((btn, idx) => {
-            setTimeout(() => collectButton(btn), idx * 500);
+        buttons.forEach(function(btn, idx) {
+            setTimeout(function() { collectButton(btn); }, idx * 500);
         });
     }
 
@@ -117,72 +176,93 @@
             timer = null;
         }
     }
+
     function buildSettingsPopup() {
-        const existing = document.getElementById('pokedive-autocollect-popup');
+        var existing = document.getElementById('pokedive-autocollect-popup');
         if (existing) existing.remove();
-        const overlay = document.createElement('div');
+
+        var overlay = document.createElement('div');
         overlay.id = 'pokedive-autocollect-overlay';
         overlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); z-index: 99999; display: none;';
-        const popup = document.createElement('div');
+
+        var popup = document.createElement('div');
         popup.id = 'pokedive-autocollect-popup';
         popup.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; background: #1a1a1a; color: #fff; border: 1px solid #444; border-radius: 8px; padding: 16px; z-index: 100000; font-family: sans-serif; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
-        const title = document.createElement('h3');
+
+        var title = document.createElement('h3');
         title.textContent = 'Auto Collect Settings';
         title.style.cssText = 'margin: 0 0 12px 0; font-size: 18px; color: #00d2ff;';
-        popup.appendChild(title);
-        const toggle = document.createElement('label');
+
+        var toggle = document.createElement('label');
         toggle.style.cssText = 'display: block; margin: 8px 0; cursor: pointer;';
         toggle.innerHTML = '<input type="checkbox" id="pd-ac-enabled" style="margin-right:8px;" ' + (settings.enabled ? 'checked' : '') + '><strong>Enabled</strong>';
-        popup.appendChild(toggle);
-        const intervalLabel = document.createElement('label');
+
+        var intervalLabel = document.createElement('label');
         intervalLabel.style.cssText = 'display: block; margin: 8px 0;';
         intervalLabel.innerHTML = '<strong>Check interval (seconds):</strong><br><input type="number" id="pd-ac-interval" value="' + (settings.interval / 1000) + '" min="5" max="3600" style="width:70px; padding:4px; background:#333; color:#fff; border:1px solid #555;">';
-        popup.appendChild(intervalLabel);
-        const debugToggle = document.createElement('label');
+
+        var debugToggle = document.createElement('label');
         debugToggle.style.cssText = 'display: block; margin: 8px 0; cursor: pointer;';
         debugToggle.innerHTML = '<input type="checkbox" id="pd-ac-debug" style="margin-right:8px;" ' + (settings.debug ? 'checked' : '') + '> Debug logging';
-        popup.appendChild(debugToggle);
-        const btnRow = document.createElement('div');
+
+        var btnRow = document.createElement('div');
         btnRow.style.cssText = 'display: flex; gap: 8px; margin-top: 16px;';
-        const saveBtn = document.createElement('button');
+
+        var saveBtn = document.createElement('button');
         saveBtn.textContent = 'Save';
         saveBtn.style.cssText = 'flex:1; padding: 8px; background: #00d2ff; color: #000; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;';
-        const closeBtn = document.createElement('button');
+
+        var closeBtn = document.createElement('button');
         closeBtn.textContent = 'Close';
         closeBtn.style.cssText = 'flex:1; padding: 8px; background: #444; color: #fff; border: 1px solid #666; border-radius: 4px; cursor: pointer;';
-        const resetBtn = document.createElement('button');
+
+        var resetBtn = document.createElement('button');
         resetBtn.textContent = 'Reset';
         resetBtn.style.cssText = 'flex:1; padding: 8px; background: #666; color: #fff; border: 1px solid #888; border-radius: 4px; cursor: pointer;';
-        saveBtn.onclick = () => {
-            const enabledCb = document.getElementById('pd-ac-enabled');
-            const intervalInput = document.getElementById('pd-ac-interval');
-            const debugCb = document.getElementById('pd-ac-debug');
+
+        saveBtn.onclick = function() {
+            var enabledCb = document.getElementById('pd-ac-enabled');
+            var intervalInput = document.getElementById('pd-ac-interval');
+            var debugCb = document.getElementById('pd-ac-debug');
             settings.enabled = enabledCb.checked;
             settings.debug = debugCb.checked;
-            const secs = parseInt(intervalInput.value, 10) || 30;
+            var secs = parseInt(intervalInput.value, 10) || 30;
             settings.interval = Math.max(5, Math.min(3600, secs)) * 1000;
             saveSettings();
             startLoop();
             overlay.style.display = 'none';
             log('Settings saved:', settings);
         };
-        closeBtn.onclick = () => { overlay.style.display = 'none'; };
-        resetBtn.onclick = () => { settings = { ...CONFIG.defaults }; saveSettings(); location.reload(); };
+
+        closeBtn.onclick = function() { overlay.style.display = 'none'; };
+
+        resetBtn.onclick = function() {
+            settings = Object.assign({}, CONFIG.defaults);
+            saveSettings();
+            location.reload();
+        };
+
         btnRow.appendChild(saveBtn);
         btnRow.appendChild(closeBtn);
         btnRow.appendChild(resetBtn);
+
+        popup.appendChild(title);
+        popup.appendChild(toggle);
+        popup.appendChild(intervalLabel);
+        popup.appendChild(debugToggle);
         popup.appendChild(btnRow);
         overlay.appendChild(popup);
         document.body.appendChild(overlay);
     }
+
     function injectToggleButton() {
-        const existing = document.getElementById('pokedive-autocollect-toggle');
+        var existing = document.getElementById('pokedive-autocollect-toggle');
         if (existing) return;
-        const btn = document.createElement('button');
+        var btn = document.createElement('button');
         btn.id = 'pokedive-autocollect-toggle';
         btn.textContent = settings.enabled ? 'AC: ON' : 'AC: OFF';
         btn.style.cssText = 'position: fixed; bottom: 16px; left: 16px; z-index: 100000; background: ' + (settings.enabled ? '#00d2ff' : '#666') + '; color: ' + (settings.enabled ? '#000' : '#fff') + '; border: none; border-radius: 4px; padding: 6px 10px; font-size: 12px; font-weight: bold; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.4);';
-        btn.onclick = (e) => {
+        btn.onclick = function(e) {
             e.preventDefault();
             e.stopPropagation();
             settings.enabled = !settings.enabled;
@@ -197,27 +277,33 @@
     }
 
     function init() {
-        if (initialized) return;
-        initialized = true;
+        if (window[INIT_KEY]) return;
+        window[INIT_KEY] = true;
+
         loadSettings();
+
         if (!window.location.hostname.includes('pokedive.com')) return;
+
         injectToggleButton();
         buildSettingsPopup();
-        const toggleBtn = document.getElementById('pokedive-autocollect-toggle');
-        let clickCount = 0;
-        let clickTimer = null;
-        toggleBtn.addEventListener('click', (e) => {
+
+        var toggleBtn = document.getElementById('pokedive-autocollect-toggle');
+        var clickCount = 0;
+        var clickTimer = null;
+        toggleBtn.addEventListener('click', function(e) {
             clickCount++;
             if (clickCount === 1) {
-                clickTimer = setTimeout(() => { clickCount = 0; }, 400);
+                clickTimer = setTimeout(function() { clickCount = 0; }, 400);
             } else if (clickCount >= 3) {
                 clearTimeout(clickTimer);
                 clickCount = 0;
-                const overlay = document.getElementById('pokedive-autocollect-overlay');
+                var overlay = document.getElementById('pokedive-autocollect-overlay');
                 if (overlay) overlay.style.display = 'flex';
             }
         });
+
         startLoop();
+        startUrlWatcher();
         log('Auto Collect initialized');
     }
 
