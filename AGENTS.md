@@ -171,3 +171,18 @@ When requirements conflict, follow the user's most recent explicit instruction f
 - Keep the metadata file's name, namespace, version, match pattern, run time, grants, and download URL consistent with the main script. Create the metadata file if a remotely updateable script does not have one.
 - Place all `*.meta.js` files in the `personal/meta/` folder at the root of the `personal/` directory, not alongside the main script. The updateURL should point to `personal/meta/<script-name>.meta.js`.
 - After finishing and validating a requested code change, provide a concise, ready-to-paste commit message summarizing the changes since the last commit. Do not create the commit unless explicitly asked.
+
+## 15. Site Terms (ToS.md) Check Before Any Project Work
+
+Before starting work on any project within a subfolder of `personal/`:
+
+1. Identify the subfolder name (typically the target site's URL, e.g. `pokedive.com/` for `Auto_Collect.js`).
+2. Look for a file named `ToS.md` inside that subfolder.
+3. If `ToS.md` exists, read it to understand what is allowed and not allowed for that site, and ensure the project stays within those guidelines.
+4. If `ToS.md` does not exist, do an internet search for the site name combined with terms such as: guidelines, terms of service, terms, rules, policy, terms of use, script use, automation, bots, userscripts, or cheating.
+5. Manually create `ToS.md` inside that subfolder and record:
+   - The sources checked (URLs).
+   - Any relevant quotes about script use, automation, cheating, or third-party tools.
+   - A summary of what is allowed/not allowed.
+6. If nothing relevant exists online, create `ToS.md` anyway and state that terms or guidelines were not available, and that scripts should avoid anything that could be considered cheating (e.g., aimbot, unlimited health, mana, money, or any feature giving an unfair advantage).
+7. If the user asks to create or update something that you believe conflicts with that subfolder's `ToS.md`, inform the user of the conflict and ask whether they wish to continue before making any changes.
