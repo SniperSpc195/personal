@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are maxed or unchanged for 5s
 // @author       Cline
 // @match        *://pokedive.com/*
