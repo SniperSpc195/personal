@@ -169,4 +169,5 @@ When requirements conflict, follow the user's most recent explicit instruction f
 - After changing a userscript, increment its `@version` in the main `.js` file and update the matching metadata file to the same version in the same change. Use the next patch version unless the scope warrants a minor or major version increment.
 - Keep the main script's `@downloadURL` pointed at that script's raw GitHub URL and its `@updateURL` pointed at the corresponding metadata file.
 - Keep the metadata file's name, namespace, version, match pattern, run time, grants, and download URL consistent with the main script. Create the metadata file if a remotely updateable script does not have one.
+- Place all `*.meta.js` files in the `personal/meta/` folder at the root of the `personal/` directory, not alongside the main script. The updateURL should point to `personal/meta/<script-name>.meta.js`.
 - After finishing and validating a requested code change, provide a concise, ready-to-paste commit message summarizing the changes since the last commit. Do not create the commit unless explicitly asked.
