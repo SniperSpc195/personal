@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.3
+// @version      1.2.4
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are maxed or unchanged for 5s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -384,14 +384,13 @@
         btn.onclick = function(e) {
             e.preventDefault();
             e.stopPropagation();
-            settings.enabled = !settings.enabled;
-            btn.textContent = settings.enabled ? 'AC: ON' : 'AC: OFF';
-            btn.setAttribute('aria-label', 'Auto Collect ' + (settings.enabled ? 'enabled' : 'disabled'));
-            btn.style.background = settings.enabled ? '#00d2ff' : '#666';
-            btn.style.color = settings.enabled ? '#000' : '#fff';
-            saveSettings();
-            if (settings.enabled) { startPoll(); } else { stopPoll(); }
-            log('Auto collect toggled:', settings.enabled);
+            var overlay = document.getElementById('pokedive-ac-overlay');
+            if (overlay) {
+                overlay.style.display = 'flex';
+                log('Settings popup opened');
+            } else {
+                log('Settings overlay not found');
+            }
         };
         document.body.appendChild(btn);
     }
