@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.5
+// @version      1.2.6
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -59,6 +59,7 @@
     let lastResourceValues = null;
     let resourceStableSince = null; // timestamp when values became stable
     let stableTriggerFired = false;
+    let stableTriggerWaiting = false;
     const diagnosticEntries = [];
     const MAX_DIAGNOSTIC_ENTRIES = 30;
 
@@ -203,29 +204,29 @@
         if (!settings.enabled) {
             recordDiagnostic('Skipped: automation is disabled.');
             log('Collect skipped (disabled):', reason);
-            return;
+            return false;
         }
         if (isCollecting) {
             recordDiagnostic('Skipped: another collection is already running.');
             log('Collect skipped (already collecting):', reason);
-            return;
+            return false;
         }
         var cooldownRemaining = COLLECT_COOLDOWN_MS - (now() - lastCollectTime);
         if (cooldownRemaining > 0) {
             recordDiagnostic('Skipped: cooldown has ' + Math.ceil(cooldownRemaining / 1000) + 's remaining.');
             log('Collect skipped (cooldown):', reason);
-            return;
+            return false;
         }
         var btn = getGatherButton();
         if (!btn) {
             recordDiagnostic('Skipped: collect button was not found.');
             log('No gather button available:', reason);
-            return;
+            return false;
         }
         if (!gatherHasAmounts()) {
             recordDiagnostic('Skipped: no visible resources are available to collect.');
             log('Nothing to collect:', reason);
-            return;
+            return false;
         }
         isCollecting = true;
         lastCollectTime = now();
@@ -234,9 +235,11 @@
             btn.click();
             recordDiagnostic('Collect button clicked (' + reason + ').');
             log('Collected (' + reason + '):', btn.textContent.trim());
+            return true;
         } catch (e) {
             recordDiagnostic('Collection click failed: ' + (e && e.message ? e.message : String(e)));
             log('Error clicking gather:', e);
+            return false;
         } finally {
             isCollecting = false;
         }
@@ -291,6 +294,7 @@
             resourceStableSince = null;
             lastResourceValues = null;
             stableTriggerFired = false;
+            stableTriggerWaiting = false;
             return;
         }
         var cur = getResourceValues();
@@ -298,6 +302,7 @@
             lastResourceValues = cur;
             resourceStableSince = null;
             stableTriggerFired = false;
+            stableTriggerWaiting = false;
             if (Object.keys(cur).length > 0) {
                 recordDiagnostic('Tracking resource values: ' + JSON.stringify(cur) + '.');
             }
@@ -312,6 +317,7 @@
             lastResourceValues = cur;
             resourceStableSince = null;
             stableTriggerFired = false;
+            stableTriggerWaiting = false;
             return;
         }
         keys.forEach(function(k) {
@@ -331,6 +337,7 @@
             lastResourceValues = cur;
             resourceStableSince = null;
             stableTriggerFired = false;
+            stableTriggerWaiting = false;
             recordDiagnostic('Resource values changed; stability timer restarted: ' + JSON.stringify(cur) + '.');
             log('Resource values changed, stability timer reset');
             return;
@@ -344,10 +351,18 @@
         }
         var stableFor = now() - resourceStableSince;
         if (!stableTriggerFired && stableFor >= settings.stableSeconds * 1000) {
-            stableTriggerFired = true;
-            recordDiagnostic('Stable trigger fired after ' + Math.floor(stableFor / 1000) + 's unchanged.');
-            log('Stability threshold reached (' + stableFor + 'ms >= ' + settings.stableSeconds * 1000 + 'ms)');
-            collect('resources stable for ' + stableFor + 'ms');
+            if (now() - lastCollectTime < COLLECT_COOLDOWN_MS || !gatherHasAmounts()) {
+                if (!stableTriggerWaiting) {
+                    stableTriggerWaiting = true;
+                    recordDiagnostic('Stable threshold reached after ' + Math.floor(stableFor / 1000) + 's; waiting for collectable resources or cooldown.');
+                }
+                return;
+            }
+            if (collect('resources stable for ' + stableFor + 'ms')) {
+                stableTriggerFired = true;
+                stableTriggerWaiting = false;
+                recordDiagnostic('Stable trigger completed; it will re-arm after resource values change.');
+            }
         }
     }
 
@@ -414,6 +429,7 @@
                     lastResourceValues = null;
                     resourceStableSince = null;
                     stableTriggerFired = false;
+                    stableTriggerWaiting = false;
                     observeHud();
                     startPoll();
                     startUrlWatcher();
@@ -601,6 +617,7 @@
         inTown = null;
         seenExpedition = false;
         stableTriggerFired = false;
+        stableTriggerWaiting = false;
         log('Cleanup complete');
     }
 
