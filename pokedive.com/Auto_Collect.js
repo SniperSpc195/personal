@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.4
-// @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are maxed or unchanged for 5s
+// @version      1.2.5
+// @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
 // @match        *://www.pokedive.com/*
@@ -58,12 +58,47 @@
 
     let lastResourceValues = null;
     let resourceStableSince = null; // timestamp when values became stable
+    let stableTriggerFired = false;
+    const diagnosticEntries = [];
+    const MAX_DIAGNOSTIC_ENTRIES = 30;
 
     const log = (...args) => {
         if (settings.debug) {
             console.log('[' + SCRIPT_NAME + ']', ...args);
         }
     };
+
+    function renderDiagnostics() {
+        var list = document.getElementById('pokedive-ac-diagnostics-list');
+        if (!list) return;
+
+        while (list.firstChild) list.removeChild(list.firstChild);
+        if (diagnosticEntries.length === 0) {
+            var empty = document.createElement('div');
+            empty.textContent = 'No activity recorded yet.';
+            empty.style.color = '#aaa';
+            list.appendChild(empty);
+            return;
+        }
+
+        diagnosticEntries.forEach(function(entry) {
+            var row = document.createElement('div');
+            row.textContent = '[' + entry.time + '] ' + entry.message;
+            row.style.cssText = 'padding: 4px 0; border-top: 1px solid #333; overflow-wrap: anywhere;';
+            list.appendChild(row);
+        });
+    }
+
+    function recordDiagnostic(message) {
+        diagnosticEntries.unshift({
+            time: new Date().toLocaleTimeString(),
+            message: String(message),
+        });
+        if (diagnosticEntries.length > MAX_DIAGNOSTIC_ENTRIES) {
+            diagnosticEntries.length = MAX_DIAGNOSTIC_ENTRIES;
+        }
+        renderDiagnostics();
+    }
 
     /* ---------- settings persistence ---------- */
 
@@ -164,24 +199,31 @@
     /* ---------- collection ---------- */
 
     function collect(reason) {
+        recordDiagnostic('Collection requested: ' + reason);
         if (!settings.enabled) {
+            recordDiagnostic('Skipped: automation is disabled.');
             log('Collect skipped (disabled):', reason);
             return;
         }
         if (isCollecting) {
+            recordDiagnostic('Skipped: another collection is already running.');
             log('Collect skipped (already collecting):', reason);
             return;
         }
-        if (now() - lastCollectTime < COLLECT_COOLDOWN_MS) {
+        var cooldownRemaining = COLLECT_COOLDOWN_MS - (now() - lastCollectTime);
+        if (cooldownRemaining > 0) {
+            recordDiagnostic('Skipped: cooldown has ' + Math.ceil(cooldownRemaining / 1000) + 's remaining.');
             log('Collect skipped (cooldown):', reason);
             return;
         }
         var btn = getGatherButton();
         if (!btn) {
+            recordDiagnostic('Skipped: collect button was not found.');
             log('No gather button available:', reason);
             return;
         }
         if (!gatherHasAmounts()) {
+            recordDiagnostic('Skipped: no visible resources are available to collect.');
             log('Nothing to collect:', reason);
             return;
         }
@@ -190,8 +232,10 @@
         try {
             btn.dataset.pdCollected = 'true';
             btn.click();
+            recordDiagnostic('Collect button clicked (' + reason + ').');
             log('Collected (' + reason + '):', btn.textContent.trim());
         } catch (e) {
+            recordDiagnostic('Collection click failed: ' + (e && e.message ? e.message : String(e)));
             log('Error clicking gather:', e);
         } finally {
             isCollecting = false;
@@ -207,6 +251,7 @@
 
     function onModeChanged(prevMode, newMode) {
         log('Hud mode changed:', prevMode, '->', newMode);
+        recordDiagnostic('HUD mode changed: ' + prevMode + ' -> ' + newMode + '.');
         var prevTown = prevMode === 'town';
         var newTown = newMode === 'town';
 
@@ -215,16 +260,22 @@
             seenExpedition = true;
             if (settings.collectOnReturn) {
                 // small delay to let the town HUD settle
+                recordDiagnostic('Return-from-expedition trigger detected.');
                 log('Return-from-expedition trigger will collect in 800ms');
                 setTimeout(function() { collect('return from expedition'); }, 800);
+            } else {
+                recordDiagnostic('Return trigger ignored: disabled in settings.');
             }
         }
         if (prevTown && !newTown) {
             // leaving town for an expedition
             seenExpedition = true;
             if (settings.collectOnDeparture) {
+                recordDiagnostic('Departure trigger detected.');
                 log('Departure-to-expedition trigger collecting now');
                 collect('departure to expedition');
+            } else {
+                recordDiagnostic('Departure trigger ignored: disabled in settings.');
             }
         }
         inTown = newTown;
@@ -234,20 +285,33 @@
 
     function checkResources() {
         if (!settings.enabled || !settings.collectWhenStable) {
+            if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired) {
+                recordDiagnostic('Stability timer reset: stable collection is disabled.');
+            }
             resourceStableSince = null;
             lastResourceValues = null;
+            stableTriggerFired = false;
             return;
         }
         var cur = getResourceValues();
         if (lastResourceValues === null) {
             lastResourceValues = cur;
             resourceStableSince = null;
+            stableTriggerFired = false;
+            if (Object.keys(cur).length > 0) {
+                recordDiagnostic('Tracking resource values: ' + JSON.stringify(cur) + '.');
+            }
             return;
         }
         var changed = false;
         var keys = Object.keys(cur);
         if (keys.length === 0) {
+            if (Object.keys(lastResourceValues).length > 0) {
+                recordDiagnostic('Resource values disappeared; stability timer reset.');
+            }
             lastResourceValues = cur;
+            resourceStableSince = null;
+            stableTriggerFired = false;
             return;
         }
         keys.forEach(function(k) {
@@ -266,6 +330,8 @@
         if (changed) {
             lastResourceValues = cur;
             resourceStableSince = null;
+            stableTriggerFired = false;
+            recordDiagnostic('Resource values changed; stability timer restarted: ' + JSON.stringify(cur) + '.');
             log('Resource values changed, stability timer reset');
             return;
         }
@@ -273,18 +339,15 @@
         // values are stable
         if (resourceStableSince === null) {
             resourceStableSince = now();
+            recordDiagnostic('Resource values are unchanged; ' + settings.stableSeconds + 's stability timer started.');
             log('Resources became stable, starting ' + settings.stableSeconds + 's timer');
         }
         var stableFor = now() - resourceStableSince;
-        if (stableFor >= settings.stableSeconds * 1000) {
+        if (!stableTriggerFired && stableFor >= settings.stableSeconds * 1000) {
+            stableTriggerFired = true;
+            recordDiagnostic('Stable trigger fired after ' + Math.floor(stableFor / 1000) + 's unchanged.');
             log('Stability threshold reached (' + stableFor + 'ms >= ' + settings.stableSeconds * 1000 + 'ms)');
             collect('resources stable for ' + stableFor + 'ms');
-            // reset so we wait for the next change/stable cycle. Keep
-            // lastResourceValues as current values so the next poll can
-            // detect a post-collection change immediately instead of
-            // skipping a beat.
-            resourceStableSince = null;
-            lastResourceValues = cur;
         }
     }
 
@@ -318,6 +381,7 @@
                         if (node.nodeType !== 1) return;
                         var gather = node.id === 'gather' ? node : (node.querySelector ? node.querySelector('#gather') : null);
                         if (gather && isTown() && settings.collectOnReturn && seenExpedition) {
+                            recordDiagnostic('Gather panel appeared after expedition; return trigger scheduled.');
                             log('Gather panel appeared trigger will collect in 800ms');
                             setTimeout(function() { collect('gather panel appeared'); }, 800);
                         }
@@ -349,6 +413,7 @@
                     seenExpedition = false;
                     lastResourceValues = null;
                     resourceStableSince = null;
+                    stableTriggerFired = false;
                     observeHud();
                     startPoll();
                     startUrlWatcher();
@@ -405,7 +470,7 @@
 
         var popup = document.createElement('div');
         popup.id = 'pokedive-ac-popup';
-        popup.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; background: #1a1a1a; color: #fff; border: 1px solid #444; border-radius: 8px; padding: 16px; z-index: 100000; font-family: sans-serif; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
+        popup.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 90%; max-width: 340px; max-height: calc(100vh - 32px); overflow-y: auto; box-sizing: border-box; background: #1a1a1a; color: #fff; border: 1px solid #444; border-radius: 8px; padding: 16px; z-index: 100000; font-family: sans-serif; font-size: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);';
 
         var title = document.createElement('h3');
         title.textContent = 'Auto Collect Settings';
@@ -432,6 +497,29 @@
         intervalLabel.innerHTML = '<strong>Check interval (seconds):</strong><br><input type="number" id="pd-ac-poll-interval" value="' + (settings.pollInterval / 1000) + '" min="1" max="60" style="width:70px; padding:4px; background:#333; color:#fff; border:1px solid #555;">';
 
         var debugToggle = makeToggle('Debug logging', settings.debug, 'debug');
+
+        var diagnosticsHeader = document.createElement('div');
+        diagnosticsHeader.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-top: 14px;';
+        var diagnosticsTitle = document.createElement('strong');
+        diagnosticsTitle.textContent = 'Recent activity';
+        var clearDiagnosticsBtn = document.createElement('button');
+        clearDiagnosticsBtn.type = 'button';
+        clearDiagnosticsBtn.textContent = 'Clear';
+        clearDiagnosticsBtn.setAttribute('aria-label', 'Clear recent activity');
+        clearDiagnosticsBtn.style.cssText = 'padding: 4px 8px; background: #444; color: #fff; border: 1px solid #666; border-radius: 4px; cursor: pointer;';
+        clearDiagnosticsBtn.onclick = function() {
+            diagnosticEntries.length = 0;
+            renderDiagnostics();
+        };
+        diagnosticsHeader.appendChild(diagnosticsTitle);
+        diagnosticsHeader.appendChild(clearDiagnosticsBtn);
+
+        var diagnosticsList = document.createElement('div');
+        diagnosticsList.id = 'pokedive-ac-diagnostics-list';
+        diagnosticsList.setAttribute('role', 'log');
+        diagnosticsList.setAttribute('aria-live', 'polite');
+        diagnosticsList.style.cssText = 'max-height: 160px; overflow-y: auto; margin-top: 6px; padding: 6px 8px; background: #111; border: 1px solid #444; border-radius: 4px; color: #ddd; font-size: 12px;';
+        renderDiagnostics();
 
         var btnRow = document.createElement('div');
         btnRow.style.cssText = 'display: flex; gap: 8px; margin-top: 16px;';
@@ -490,6 +578,8 @@
         popup.appendChild(stableLabel);
         popup.appendChild(intervalLabel);
         popup.appendChild(debugToggle);
+        popup.appendChild(diagnosticsHeader);
+        popup.appendChild(diagnosticsList);
         popup.appendChild(btnRow);
         overlay.appendChild(popup);
         document.body.appendChild(overlay);
@@ -510,6 +600,7 @@
         resourceStableSince = null;
         inTown = null;
         seenExpedition = false;
+        stableTriggerFired = false;
         log('Cleanup complete');
     }
 
@@ -523,6 +614,7 @@
         observeHud();
         startPoll();
         startUrlWatcher();
+        recordDiagnostic('Auto Collect initialized; HUD mode: ' + (getHudMode() || 'unknown') + '.');
         log('Auto Collect initialized (mode:', getHudMode(), ')');
     }
 
