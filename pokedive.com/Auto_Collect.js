@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are maxed or unchanged for 5s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -120,6 +120,10 @@
         return el && el.offsetParent !== null && !el.hidden;
     }
 
+    function isTown() {
+        return inTown === true;
+    }
+
     function parseNum(text) {
         var n = parseInt((text || '').replace(/[^0-9-]/g, ''), 10);
         return isNaN(n) ? null : n;
@@ -160,8 +164,14 @@
     /* ---------- collection ---------- */
 
     function collect(reason) {
-        if (!settings.enabled) return;
-        if (isCollecting) return;
+        if (!settings.enabled) {
+            log('Collect skipped (disabled):', reason);
+            return;
+        }
+        if (isCollecting) {
+            log('Collect skipped (already collecting):', reason);
+            return;
+        }
         if (now() - lastCollectTime < COLLECT_COOLDOWN_MS) {
             log('Collect skipped (cooldown):', reason);
             return;
@@ -205,6 +215,7 @@
             seenExpedition = true;
             if (settings.collectOnReturn) {
                 // small delay to let the town HUD settle
+                log('Return-from-expedition trigger will collect in 800ms');
                 setTimeout(function() { collect('return from expedition'); }, 800);
             }
         }
@@ -212,6 +223,7 @@
             // leaving town for an expedition
             seenExpedition = true;
             if (settings.collectOnDeparture) {
+                log('Departure-to-expedition trigger collecting now');
                 collect('departure to expedition');
             }
         }
@@ -244,21 +256,35 @@
         Object.keys(lastResourceValues).forEach(function(k) {
             if (cur[k] === undefined) changed = true;
         });
+        // Also treat brand-new resource keys as a change (e.g. a new resource
+        // type appears in the HUD). Otherwise the stability timer would never
+        // reset when a previously-untracked resource shows up.
+        Object.keys(cur).forEach(function(k) {
+            if (lastResourceValues[k] === undefined) changed = true;
+        });
 
         if (changed) {
             lastResourceValues = cur;
             resourceStableSince = null;
+            log('Resource values changed, stability timer reset');
             return;
         }
 
         // values are stable
-        if (resourceStableSince === null) resourceStableSince = now();
+        if (resourceStableSince === null) {
+            resourceStableSince = now();
+            log('Resources became stable, starting ' + settings.stableSeconds + 's timer');
+        }
         var stableFor = now() - resourceStableSince;
         if (stableFor >= settings.stableSeconds * 1000) {
+            log('Stability threshold reached (' + stableFor + 'ms >= ' + settings.stableSeconds * 1000 + 'ms)');
             collect('resources stable for ' + stableFor + 'ms');
-            // reset so we wait for the next change/stable cycle
+            // reset so we wait for the next change/stable cycle. Keep
+            // lastResourceValues as current values so the next poll can
+            // detect a post-collection change immediately instead of
+            // skipping a beat.
             resourceStableSince = null;
-            lastResourceValues = null;
+            lastResourceValues = cur;
         }
     }
 
@@ -292,6 +318,7 @@
                         if (node.nodeType !== 1) return;
                         var gather = node.id === 'gather' ? node : (node.querySelector ? node.querySelector('#gather') : null);
                         if (gather && isTown() && settings.collectOnReturn && seenExpedition) {
+                            log('Gather panel appeared trigger will collect in 800ms');
                             setTimeout(function() { collect('gather panel appeared'); }, 800);
                         }
                     });
