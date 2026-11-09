@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
+// @version      1.2.8
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -60,6 +60,23 @@
     let resourceStableSince = null; // timestamp when values became stable
     let stableTriggerFired = false;
     let stableTriggerWaiting = false;
+
+    // Return-from-expedition poller (waits until gather button has amounts)
+    let returnPollTimer = null;
+    const RETURN_POLL_INTERVAL_MS = 250;
+    const RETURN_POLL_MAX_ATTEMPTS = 40; // ~10s
+
+    // Departure best-effort rapid retry (during town→expedition transition)
+    let departureRetryTimer = null;
+    const DEPARTURE_RETRY_INTERVAL_MS = 200;
+    const DEPARTURE_RETRY_MAX_ATTEMPTS = 15; // ~3s
+
+    // Prompt town-resource collection (collectOnDeparture: clear resources
+    // shortly after they appear in the gather panel, before the user departs)
+    let promptCollectTimer = null;
+    let promptCollectArmed = false;
+    const PROMPT_COLLECT_DELAY_MS = 3000;
+
     const diagnosticEntries = [];
     const MAX_DIAGNOSTIC_ENTRIES = 30;
 
@@ -264,10 +281,9 @@
             // returned from expedition to town
             seenExpedition = true;
             if (settings.collectOnReturn) {
-                // small delay to let the town HUD settle
-                recordDiagnostic('Return-from-expedition trigger detected.');
-                log('Return-from-expedition trigger will collect in 800ms');
-                setTimeout(function() { collect('return from expedition'); }, 800);
+                recordDiagnostic('Return-from-expedition trigger detected; waiting for collectable resources.');
+                log('Return-from-expedition trigger will poll for gather button');
+                startReturnPoll();
             } else {
                 recordDiagnostic('Return trigger ignored: disabled in settings.');
             }
@@ -276,9 +292,9 @@
             // leaving town for an expedition
             seenExpedition = true;
             if (settings.collectOnDeparture) {
-                recordDiagnostic('Departure trigger detected.');
-                log('Departure-to-expedition trigger collecting now');
-                collect('departure to expedition');
+                recordDiagnostic('Departure trigger detected; rapid retry for collectable resources.');
+                log('Departure-to-expedition trigger will rapid-retry collect');
+                startDepartureRetry();
             } else {
                 recordDiagnostic('Departure trigger ignored: disabled in settings.');
             }
@@ -289,7 +305,47 @@
     /* ---------- resource stability monitor ---------- */
 
     function checkResources() {
-        if (!settings.enabled || !settings.collectWhenStable) {
+        if (!settings.enabled) {
+            if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired || promptCollectArmed) {
+                recordDiagnostic('Stability/prompt timer reset: automation is disabled.');
+            }
+            resourceStableSince = null;
+            lastResourceValues = null;
+            stableTriggerFired = false;
+            stableTriggerWaiting = false;
+            if (promptCollectArmed) {
+                clearTimeout(promptCollectTimer);
+                promptCollectTimer = null;
+                promptCollectArmed = false;
+            }
+            return;
+        }
+        var cur = getResourceValues();
+
+        // Prompt town-resource collection (collectOnDeparture): when in town
+        // and the gather panel shows amounts, collect shortly after they appear
+        // so town resources are cleared before the user departs on an expedition.
+        if (settings.collectOnDeparture && isTown() && gatherHasAmounts()) {
+            if (!promptCollectArmed) {
+                promptCollectArmed = true;
+                recordDiagnostic('Resources present in town; prompt collect scheduled in ' + (PROMPT_COLLECT_DELAY_MS / 1000) + 's.');
+                promptCollectTimer = setTimeout(function() {
+                    promptCollectArmed = false;
+                    promptCollectTimer = null;
+                    if (settings.enabled && settings.collectOnDeparture && isTown() && gatherHasAmounts()) {
+                        collect('town resources present (pre-departure)');
+                    }
+                }, PROMPT_COLLECT_DELAY_MS);
+            }
+        } else {
+            if (promptCollectArmed) {
+                clearTimeout(promptCollectTimer);
+                promptCollectTimer = null;
+                promptCollectArmed = false;
+            }
+        }
+
+        if (!settings.collectWhenStable) {
             if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired) {
                 recordDiagnostic('Stability timer reset: stable collection is disabled.');
             }
@@ -299,7 +355,6 @@
             stableTriggerWaiting = false;
             return;
         }
-        var cur = getResourceValues();
         if (lastResourceValues === null) {
             lastResourceValues = cur;
             resourceStableSince = null;
@@ -376,6 +431,58 @@
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
 
+    /* ---------- return / departure pollers ---------- */
+
+    // Return from expedition: poll until the gather button actually has
+    // collectable amounts (expedition loot may take a moment to appear),
+    // then collect. Stops as soon as collection succeeds or attempts expire.
+    function startReturnPoll() {
+        if (returnPollTimer) clearInterval(returnPollTimer);
+        var attempts = 0;
+        returnPollTimer = setInterval(function() {
+            attempts++;
+            if (!settings.enabled || !settings.collectOnReturn) {
+                clearInterval(returnPollTimer);
+                returnPollTimer = null;
+                return;
+            }
+            if (gatherHasAmounts()) {
+                clearInterval(returnPollTimer);
+                returnPollTimer = null;
+                collect('return from expedition (polled)');
+            } else if (attempts >= RETURN_POLL_MAX_ATTEMPTS) {
+                clearInterval(returnPollTimer);
+                returnPollTimer = null;
+                recordDiagnostic('Return poll timed out: no collectable resources.');
+            }
+        }, RETURN_POLL_INTERVAL_MS);
+    }
+
+    // Departure: best-effort rapid retry during the town→expedition transition
+    // window, in case the gather button is briefly still clickable.
+    function startDepartureRetry() {
+        if (departureRetryTimer) clearInterval(departureRetryTimer);
+        var attempts = 0;
+        departureRetryTimer = setInterval(function() {
+            attempts++;
+            if (!settings.enabled || !settings.collectOnDeparture || isTown()) {
+                // Still in town (transition did not complete) or disabled.
+                clearInterval(departureRetryTimer);
+                departureRetryTimer = null;
+                return;
+            }
+            if (gatherHasAmounts()) {
+                clearInterval(departureRetryTimer);
+                departureRetryTimer = null;
+                collect('departure to expedition (retry)');
+            } else if (attempts >= DEPARTURE_RETRY_MAX_ATTEMPTS) {
+                clearInterval(departureRetryTimer);
+                departureRetryTimer = null;
+                recordDiagnostic('Departure retry timed out: no collectable resources.');
+            }
+        }, DEPARTURE_RETRY_INTERVAL_MS);
+    }
+
     /* ---------- observers ---------- */
 
     function observeHud() {
@@ -398,9 +505,9 @@
                         if (node.nodeType !== 1) return;
                         var gather = node.id === 'gather' ? node : (node.querySelector ? node.querySelector('#gather') : null);
                         if (gather && isTown() && settings.collectOnReturn && seenExpedition) {
-                            recordDiagnostic('Gather panel appeared after expedition; return trigger scheduled.');
-                            log('Gather panel appeared trigger will collect in 800ms');
-                            setTimeout(function() { collect('gather panel appeared'); }, 800);
+                            recordDiagnostic('Gather panel appeared after expedition; waiting for collectable resources.');
+                            log('Gather panel appeared trigger will poll for gather button');
+                            startReturnPoll();
                         }
                     });
                 }
@@ -432,6 +539,7 @@
                     resourceStableSince = null;
                     stableTriggerFired = false;
                     stableTriggerWaiting = false;
+                    promptCollectArmed = false;
                     observeHud();
                     startPoll();
                     startUrlWatcher();
@@ -608,6 +716,9 @@
     function cleanup() {
         stopPoll();
         stopUrlWatcher();
+        if (returnPollTimer) { clearInterval(returnPollTimer); returnPollTimer = null; }
+        if (departureRetryTimer) { clearInterval(departureRetryTimer); departureRetryTimer = null; }
+        if (promptCollectTimer) { clearTimeout(promptCollectTimer); promptCollectTimer = null; }
         if (hudObserver) { hudObserver.disconnect(); hudObserver = null; }
         removeToggle();
         ['pokedive-ac-popup', 'pokedive-ac-overlay'].forEach(function(id) {
@@ -620,6 +731,7 @@
         seenExpedition = false;
         stableTriggerFired = false;
         stableTriggerWaiting = false;
+        promptCollectArmed = false;
         log('Cleanup complete');
     }
 

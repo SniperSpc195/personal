@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
+// @version      1.2.8
 // @description  Automatically collects available rewards on pokedive.com
 // @author       Cline
 // @match        *://pokedive.com/*
