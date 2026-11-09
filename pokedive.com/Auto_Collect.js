@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.6
+// @version      1.2.7
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -38,7 +38,7 @@
             hud: '#hud',
             gather: '#gather',
             gatherButton: '#gather button[data-act="collect-all"]',
-            resources: '#res button.r .rn',
+            resources: '#gather span[data-id] .rn',
         },
     };
 
@@ -170,8 +170,10 @@
     function getResourceValues() {
         var out = {};
         qsa(CONFIG.selectors.resources).forEach(function(span) {
-            var btn = span.closest ? span.closest('button') : null;
-            var id = btn ? btn.getAttribute('data-id') : null;
+            // Resources render as: <span data-id="building"><span class="rn">+N</span></span>
+            // inside the #gather panel. Read the id from the data-id span, not a button.
+            var host = span.closest ? span.closest('[data-id]') : null;
+            var id = host ? host.getAttribute('data-id') : null;
             if (!id) return;
             var v = parseNum(span.textContent);
             if (v !== null) out[id] = v;
