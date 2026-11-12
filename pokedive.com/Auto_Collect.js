@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.8
-// @description  Automatically collects resources on pokedive.com: on return from expedition, before departure, and when resources are unchanged for 10s
+// @version      1.2.9
+// @description  Automatically collects resources on pokedive.com: on return from expedition, before departure (ready button / expedition start), and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
 // @match        *://www.pokedive.com/*
@@ -32,6 +32,8 @@
             collectOnDeparture: true,   // collect just before leaving on an expedition
             collectWhenStable: true,    // collect when resources stop changing
             stableSeconds: 10,           // seconds of no change before collecting
+            collectOnReadyButton: true,  // collect when the ready button is activated
+            collectOnExpeditionStart: true, // collect when the user starts the expedition
             pollInterval: 1000,         // ms between resource-value checks
         },
         selectors: {
@@ -39,6 +41,9 @@
             gather: '#gather',
             gatherButton: '#gather button[data-act="collect-all"]',
             resources: '#gather span[data-id] .rn',
+            // Expedition-initiation triggers (candidates; first match wins).
+            readyButton: 'button[data-act="ready"], button[data-act="listo"], button.ready, [data-state="ready"]',
+            expeditionStart: 'button[data-act="start-expedition"], button[data-act="partida"], button[data-act="expedition"], button.start-expedition',
         },
     };
 
@@ -75,7 +80,13 @@
     // shortly after they appear in the gather panel, before the user departs)
     let promptCollectTimer = null;
     let promptCollectArmed = false;
-    const PROMPT_COLLECT_DELAY_MS = 3000;
+
+// NEW: expedition-initiation state
+let readyObserver = null;
+let departureCollected = false; // collected once per town->expedition cycle
+let expeditionClickListenerAttached = false;
+
+const PROMPT_COLLECT_DELAY_MS = 3000;
 
     const diagnosticEntries = [];
     const MAX_DIAGNOSTIC_ENTRIES = 30;
@@ -128,6 +139,8 @@
         s.collectOnReturn = typeof raw.collectOnReturn === 'boolean' ? raw.collectOnReturn : CONFIG.defaults.collectOnReturn;
         s.collectOnDeparture = typeof raw.collectOnDeparture === 'boolean' ? raw.collectOnDeparture : CONFIG.defaults.collectOnDeparture;
         s.collectWhenStable = typeof raw.collectWhenStable === 'boolean' ? raw.collectWhenStable : CONFIG.defaults.collectWhenStable;
+        s.collectOnReadyButton = typeof raw.collectOnReadyButton === 'boolean' ? raw.collectOnReadyButton : CONFIG.defaults.collectOnReadyButton;
+        s.collectOnExpeditionStart = typeof raw.collectOnExpeditionStart === 'boolean' ? raw.collectOnExpeditionStart : CONFIG.defaults.collectOnExpeditionStart;
         s.stableSeconds = typeof raw.stableSeconds === 'number' && raw.stableSeconds > 0 ? raw.stableSeconds : CONFIG.defaults.stableSeconds;
         s.pollInterval = typeof raw.pollInterval === 'number' && raw.pollInterval > 0 ? raw.pollInterval : CONFIG.defaults.pollInterval;
         return s;
@@ -216,6 +229,160 @@
         return isVisible(gather) && isVisible(btn) && (hasPositive || amounts.length > 0);
     }
 
+    /* ---------- expedition-initiation detection (ready button / start expedition) ---------- */
+
+function getReadyButton() {
+    return qs(CONFIG.selectors.readyButton);
+}
+
+function getExpeditionStartButton() {
+    return qs(CONFIG.selectors.expeditionStart);
+}
+
+function buttonText(el) {
+    return el ? (el.textContent || '').trim() : '';
+}
+
+function matchesSelectorList(el, sel) {
+    if (!el || !el.matches) return false;
+    try { return el.matches(sel); } catch (e) { return false; }
+}
+
+function looksLikeReadyButton(el) {
+    if (!el) return false;
+    if (matchesSelectorList(el, CONFIG.selectors.readyButton)) return true;
+    var t = buttonText(el).toLowerCase();
+    return t.indexOf('listo') !== -1 || t.indexOf('ready') !== -1;
+}
+
+function looksLikeExpeditionStart(el) {
+    if (!el) return false;
+    if (matchesSelectorList(el, CONFIG.selectors.expeditionStart)) return true;
+    var t = buttonText(el).toLowerCase();
+    return t.indexOf('partida') !== -1 || t.indexOf('start') !== -1 || t.indexOf('expedition') !== -1 || t.indexOf('iniciar') !== -1;
+}
+
+function isReadyButtonActive(el) {
+    if (!el || !isVisible(el) || el.disabled) return false;
+    var cls = (el.getAttribute('class') || '').toLowerCase();
+    var state = (el.getAttribute('data-state') || '').toLowerCase();
+    var aria = (el.getAttribute('aria-pressed') || '').toLowerCase();
+    var active = /active|selected|on|enabled/.test(cls) || /active|selected|on|enabled/.test(state) || aria === 'true';
+    var t = buttonText(el).toLowerCase();
+    if (t.indexOf('not ') !== -1 && (t.indexOf('ready') !== -1 || t.indexOf('listo') !== -1)) return false;
+    return active;
+}
+
+function findReadyButton() {
+    var b = getReadyButton();
+    if (b) return b;
+    var candidates = qsa('button, [role="button"]');
+    for (var i = 0; i < candidates.length; i++) {
+        if (looksLikeReadyButton(candidates[i])) return candidates[i];
+    }
+    return null;
+}
+
+function findExpeditionStartButton() {
+    var b = getExpeditionStartButton();
+    if (b) return b;
+    var candidates = qsa('button, [role="button"]');
+    for (var i = 0; i < candidates.length; i++) {
+        if (looksLikeExpeditionStart(candidates[i])) return candidates[i];
+    }
+    return null;
+}
+
+function triggerDepartureCollection(reason) {
+    if (!settings.enabled || !isTown() || departureCollected) return false;
+    recordDiagnostic('Departure trigger: ' + reason);
+    log('Departure trigger:', reason);
+    var ok = collect(reason);
+    if (ok) {
+        departureCollected = true;
+        recordDiagnostic('Departure collection performed (' + reason + ').');
+    }
+    return ok;
+}
+
+function startReadyButtonObserver() {
+    stopReadyButtonObserver();
+    if (!settings.enabled || !settings.collectOnReadyButton || !isTown()) return;
+    var initial = findReadyButton();
+    if (initial && isReadyButtonActive(initial)) {
+        triggerDepartureCollection('ready button active on town entry');
+    }
+    readyObserver = new MutationObserver(function(mutations) {
+        if (!settings.enabled || !isTown() || departureCollected) return;
+        var shouldTrigger = false;
+        mutations.forEach(function(m) {
+            if (shouldTrigger) return;
+            var nodes = [];
+            if (m.type === 'childList') {
+                m.addedNodes.forEach(function(n) {
+                    if (n.nodeType === 1) nodes.push(n);
+                });
+            } else if (m.type === 'attributes') {
+                nodes.push(m.target);
+            }
+            nodes.forEach(function(n) {
+                if (shouldTrigger) return;
+                var btn = null;
+                if (looksLikeReadyButton(n)) {
+                    btn = n;
+                } else if (n.querySelectorAll) {
+                    var f = n.querySelectorAll(CONFIG.selectors.readyButton);
+                    if (f.length) btn = f[0];
+                }
+                if (btn && isReadyButtonActive(btn)) shouldTrigger = true;
+            });
+        });
+        if (shouldTrigger) {
+            triggerDepartureCollection('ready button activated');
+        }
+    });
+    try {
+        readyObserver.observe(document.body, { childList: true, attributes: true, subtree: true });
+    } catch (e) {
+        log('Ready button observer failed:', e);
+        readyObserver = null;
+    }
+}
+
+function stopReadyButtonObserver() {
+    if (readyObserver) { readyObserver.disconnect(); readyObserver = null; }
+}
+
+function handleExpeditionClick(e) {
+    if (!settings.enabled || !isTown() || departureCollected) return;
+    var target = e.target;
+    var btn = target && target.closest ? target.closest('button, [role="button"]') : null;
+    if (!btn) return;
+    var isReady = isReadyButtonActive(btn);
+    var isStart = looksLikeExpeditionStart(btn);
+    if ((isReady && settings.collectOnReadyButton) || (isStart && settings.collectOnExpeditionStart)) {
+        recordDiagnostic('Expedition button clicked: ' + (isStart ? 'start' : 'ready'));
+        triggerDepartureCollection(isStart ? 'expedition start clicked' : 'ready button clicked');
+    }
+}
+
+function attachExpeditionClickListeners() {
+    if (expeditionClickListenerAttached) return;
+    try {
+        document.addEventListener('click', handleExpeditionClick, true);
+        expeditionClickListenerAttached = true;
+    } catch (e) {
+        log('Expedition click listener failed:', e);
+    }
+}
+
+function removeExpeditionClickListeners() {
+    if (expeditionClickListenerAttached) {
+        try { document.removeEventListener('click', handleExpeditionClick, true); } catch (e) {}
+        expeditionClickListenerAttached = false;
+    }
+}
+
     /* ---------- collection ---------- */
 
     function collect(reason) {
@@ -280,6 +447,7 @@
         if (!prevTown && newTown) {
             // returned from expedition to town
             seenExpedition = true;
+            departureCollected = false; // new town visit; allow pre-departure collection again
             if (settings.collectOnReturn) {
                 recordDiagnostic('Return-from-expedition trigger detected; waiting for collectable resources.');
                 log('Return-from-expedition trigger will poll for gather button');
@@ -291,6 +459,7 @@
         if (prevTown && !newTown) {
             // leaving town for an expedition
             seenExpedition = true;
+            stopReadyButtonObserver(); // no longer in town
             if (settings.collectOnDeparture) {
                 recordDiagnostic('Departure trigger detected; rapid retry for collectable resources.');
                 log('Departure-to-expedition trigger will rapid-retry collect');
@@ -300,6 +469,9 @@
             }
         }
         inTown = newTown;
+        if (isTown()) {
+            startReadyButtonObserver();
+        }
     }
 
     /* ---------- resource stability monitor ---------- */
@@ -535,12 +707,14 @@
                 setTimeout(function() {
                     inTown = null;
                     seenExpedition = false;
+                    departureCollected = false;
                     lastResourceValues = null;
                     resourceStableSince = null;
                     stableTriggerFired = false;
                     stableTriggerWaiting = false;
                     promptCollectArmed = false;
                     observeHud();
+                    startReadyButtonObserver();
                     startPoll();
                     startUrlWatcher();
                 }, 300);
@@ -612,6 +786,8 @@
         var enabledToggle = makeToggle('Enabled', settings.enabled, 'enabled');
         var returnToggle = makeToggle('Collect on return from expedition', settings.collectOnReturn, 'collect-on-return');
         var departToggle = makeToggle('Collect before leaving on expedition', settings.collectOnDeparture, 'collect-on-departure');
+        var readyToggle = makeToggle('Collect on ready button (party ready-up)', settings.collectOnReadyButton, 'collect-on-ready-button');
+        var startToggle = makeToggle('Collect when starting expedition (hosting)', settings.collectOnExpeditionStart, 'collect-on-expedition-start');
         var stableToggle = makeToggle('Collect when resources stop changing', settings.collectWhenStable, 'collect-when-stable');
 
         var stableLabel = document.createElement('label');
@@ -666,6 +842,8 @@
             settings.enabled = document.getElementById('pd-ac-enabled').checked;
             settings.collectOnReturn = document.getElementById('pd-ac-collect-on-return').checked;
             settings.collectOnDeparture = document.getElementById('pd-ac-collect-on-departure').checked;
+            settings.collectOnReadyButton = document.getElementById('pd-ac-collect-on-ready-button').checked;
+            settings.collectOnExpeditionStart = document.getElementById('pd-ac-collect-on-expedition-start').checked;
             settings.collectWhenStable = document.getElementById('pd-ac-collect-when-stable').checked;
             settings.debug = document.getElementById('pd-ac-debug').checked;
             var stableSecs = parseInt(document.getElementById('pd-ac-stable-seconds').value, 10) || 5;
@@ -700,6 +878,8 @@
         popup.appendChild(enabledToggle);
         popup.appendChild(returnToggle);
         popup.appendChild(departToggle);
+        popup.appendChild(readyToggle);
+        popup.appendChild(startToggle);
         popup.appendChild(stableToggle);
         popup.appendChild(stableLabel);
         popup.appendChild(intervalLabel);
@@ -718,6 +898,8 @@
         stopUrlWatcher();
         if (returnPollTimer) { clearInterval(returnPollTimer); returnPollTimer = null; }
         if (departureRetryTimer) { clearInterval(departureRetryTimer); departureRetryTimer = null; }
+        stopReadyButtonObserver();
+        removeExpeditionClickListeners();
         if (promptCollectTimer) { clearTimeout(promptCollectTimer); promptCollectTimer = null; }
         if (hudObserver) { hudObserver.disconnect(); hudObserver = null; }
         removeToggle();
@@ -732,6 +914,7 @@
         stableTriggerFired = false;
         stableTriggerWaiting = false;
         promptCollectArmed = false;
+        departureCollected = false;
         log('Cleanup complete');
     }
 
@@ -743,6 +926,8 @@
         injectToggleButton();
         buildSettingsPopup();
         observeHud();
+        attachExpeditionClickListeners();
+        startReadyButtonObserver();
         startPoll();
         startUrlWatcher();
         recordDiagnostic('Auto Collect initialized; HUD mode: ' + (getHudMode() || 'unknown') + '.');
