@@ -9,6 +9,7 @@
 // @grant        none
 // @run-at       document-end
 // ==/UserScript==
+// @ts-nocheck
 
 (function() {
     'use strict';
