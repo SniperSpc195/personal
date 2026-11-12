@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.9
+// @version      1.3.0
 // @description  Automatically collects resources on pokedive.com on return, before departure, and when stable
 // @author       Cline
 // @match        *://pokedive.com/*

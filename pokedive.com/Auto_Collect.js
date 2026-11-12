@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PokeDive - Auto Collect
 // @namespace    http://tampermonkey.net/
-// @version      1.2.9
+// @version      1.3.0
 // @description  Automatically collects resources on pokedive.com: on return from expedition, before departure (ready button / expedition start), and when resources are unchanged for 10s
 // @author       Cline
 // @match        *://pokedive.com/*
@@ -76,17 +76,10 @@
     const DEPARTURE_RETRY_INTERVAL_MS = 200;
     const DEPARTURE_RETRY_MAX_ATTEMPTS = 15; // ~3s
 
-    // Prompt town-resource collection (collectOnDeparture: clear resources
-    // shortly after they appear in the gather panel, before the user departs)
-    let promptCollectTimer = null;
-    let promptCollectArmed = false;
-
 // NEW: expedition-initiation state
 let readyObserver = null;
 let departureCollected = false; // collected once per town->expedition cycle
 let expeditionClickListenerAttached = false;
-
-const PROMPT_COLLECT_DELAY_MS = 3000;
 
     const diagnosticEntries = [];
     const MAX_DIAGNOSTIC_ENTRIES = 30;
@@ -226,7 +219,7 @@ const PROMPT_COLLECT_DELAY_MS = 3000;
             var v = parseNum(a.textContent);
             if (v && v > 0) hasPositive = true;
         });
-        return isVisible(gather) && isVisible(btn) && (hasPositive || amounts.length > 0);
+        return isVisible(gather) && isVisible(btn) && hasPositive;
     }
 
     /* ---------- expedition-initiation detection (ready button / start expedition) ---------- */
@@ -478,44 +471,16 @@ function removeExpeditionClickListeners() {
 
     function checkResources() {
         if (!settings.enabled) {
-            if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired || promptCollectArmed) {
-                recordDiagnostic('Stability/prompt timer reset: automation is disabled.');
+            if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired) {
+                recordDiagnostic('Stability timer reset: automation is disabled.');
             }
             resourceStableSince = null;
             lastResourceValues = null;
             stableTriggerFired = false;
             stableTriggerWaiting = false;
-            if (promptCollectArmed) {
-                clearTimeout(promptCollectTimer);
-                promptCollectTimer = null;
-                promptCollectArmed = false;
-            }
             return;
         }
         var cur = getResourceValues();
-
-        // Prompt town-resource collection (collectOnDeparture): when in town
-        // and the gather panel shows amounts, collect shortly after they appear
-        // so town resources are cleared before the user departs on an expedition.
-        if (settings.collectOnDeparture && isTown() && gatherHasAmounts()) {
-            if (!promptCollectArmed) {
-                promptCollectArmed = true;
-                recordDiagnostic('Resources present in town; prompt collect scheduled in ' + (PROMPT_COLLECT_DELAY_MS / 1000) + 's.');
-                promptCollectTimer = setTimeout(function() {
-                    promptCollectArmed = false;
-                    promptCollectTimer = null;
-                    if (settings.enabled && settings.collectOnDeparture && isTown() && gatherHasAmounts()) {
-                        collect('town resources present (pre-departure)');
-                    }
-                }, PROMPT_COLLECT_DELAY_MS);
-            }
-        } else {
-            if (promptCollectArmed) {
-                clearTimeout(promptCollectTimer);
-                promptCollectTimer = null;
-                promptCollectArmed = false;
-            }
-        }
 
         if (!settings.collectWhenStable) {
             if (resourceStableSince !== null || lastResourceValues !== null || stableTriggerFired) {
@@ -712,7 +677,6 @@ function removeExpeditionClickListeners() {
                     resourceStableSince = null;
                     stableTriggerFired = false;
                     stableTriggerWaiting = false;
-                    promptCollectArmed = false;
                     observeHud();
                     startReadyButtonObserver();
                     startPoll();
@@ -900,7 +864,6 @@ function removeExpeditionClickListeners() {
         if (departureRetryTimer) { clearInterval(departureRetryTimer); departureRetryTimer = null; }
         stopReadyButtonObserver();
         removeExpeditionClickListeners();
-        if (promptCollectTimer) { clearTimeout(promptCollectTimer); promptCollectTimer = null; }
         if (hudObserver) { hudObserver.disconnect(); hudObserver = null; }
         removeToggle();
         ['pokedive-ac-popup', 'pokedive-ac-overlay'].forEach(function(id) {
@@ -913,7 +876,6 @@ function removeExpeditionClickListeners() {
         seenExpedition = false;
         stableTriggerFired = false;
         stableTriggerWaiting = false;
-        promptCollectArmed = false;
         departureCollected = false;
         log('Cleanup complete');
     }
