@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         PokeDive - Skill Details
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
-// @description  Displays detailed skill information on pokedive.com
+// @version      1.2.0
+// @description  Shows detailed stats (power, cooldown, effects) for the move you are choosing, next to the game's own learn-popup
 // @author       Cline
 // @match        *://pokedive.com/*
 // @match        *://www.pokedive.com/*
